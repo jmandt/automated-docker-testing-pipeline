@@ -1,0 +1,88 @@
+---
+image: python:3-alpine
+
+options:
+  docker: true    # enable Docker for your repository
+
+definitions:
+  services:
+    docker:
+      memory: 2048  # MB of memory
+
+  test:
+  - step: &test
+      name: Test
+      script:
+      - apk add --update nodejs nodejs-npm
+      - apk add --no-cache bash
+      - npm install -g bats
+      - chmod a+x tests/*.bats
+      - python -m pip install --upgrade pip
+      - pip install requests
+      # Build the docker image and run tests against it
+      - bats tests
+      services:
+      - docker
+
+  tag:
+  - step: &tag
+      name: Tag commit
+      image: atlassian/default-image:latest
+      script:
+      - echo 'tagging step will be executed here in the future'
+      - VERSION="$BITBUCKET_BUILD_NUMBER"
+      - git tag -a "${VERSION}" -m "[skip ci] Tagging for release ${VERSION}"
+      - git push origin ${VERSION}
+
+  login-push:
+  - step: &login-build-push
+      name: Push to ECR
+      image: python:3.6-alpine
+      script:
+      - echo 'login-build-push step will be executed here in the future'
+      - apk add --update openssl
+      - pip install awscli requests
+      # Create Login-to-ECR script
+      - echo $(aws ecr get-login --no-include-email --region $AWS_DEFAULT_REGION) > login-$AWS_ACCOUNT_ID.sh
+      # Create repo: $BITBUCKET_REPO_SLUG
+      - >
+        aws ecr create-repository --repository-name $BITBUCKET_REPO_SLUG --region $AWS_DEFAULT_REGION ||
+        echo "check if AWS ECR Repository ($BITBUCKET_REPO_SLUG) exists OR user has correct permissions"
+      - export VERSION="$BITBUCKET_BUILD_NUMBER"
+      - export AWS_ECR_URI="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com"
+      - export IMAGE="$AWS_ECR_URI/$BITBUCKET_REPO_SLUG"
+      # Build image
+      - docker build -t ${IMAGE}:${VERSION} .
+      # Tag and push image
+      - docker tag ${IMAGE}:${VERSION} ${IMAGE}:latest
+      - sh login-$AWS_ACCOUNT_ID.sh && docker push ${IMAGE}
+
+pipelines:
+  custom:
+    deploy:
+    - step: &deploy-dev
+        <<: *login-build-push
+        name: dev | Push to ECR
+        deployment: test
+    - step:  &deploy-stg
+        <<: *login-build-push
+        name: stg | Push to ECR
+        deployment: staging
+    - step: &deploy-prd
+        <<: *login-build-push
+        name: prd | Push to ECR
+        deployment: production
+
+  default:
+  - step: *test
+  - step: *deploy-dev
+  - step:
+      <<: *deploy-stg
+      trigger: manual
+  branches:
+    master:
+    - step: *test
+    - step:
+        <<: *deploy-prd
+        trigger: manual
+    - step: *tag
